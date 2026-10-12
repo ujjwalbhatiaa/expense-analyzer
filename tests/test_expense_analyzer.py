@@ -172,3 +172,79 @@ def test_analyze_empty():
     assert report["transaction_count"] == 0
     assert report["monthly_summary"] == {}
     assert "EXPENSE REPORT" in format_report(report)
+
+
+# --- budget alerts --------------------------------------------------------
+
+from expense_analyzer import budget_alerts  # noqa: E402
+
+
+def budget_txns():
+    return [
+        txn(3, "COSTCO WHOLESALE #112", -250.00, "groceries"),
+        txn(10, "SAFEWAY #22", -180.00, "groceries"),
+        txn(12, "TIM HORTONS #4821", -12.00, "dining"),
+        txn(15, "NETFLIX.COM", -16.99, "subscriptions"),
+        txn(20, "PAYROLL DEPOSIT", 3200.00, "income"),
+    ]
+
+
+def test_budget_alerts_flags_overrun():
+    alerts = budget_alerts(budget_txns(), {"groceries": 400.0})
+    assert len(alerts) == 1
+    a = alerts[0]
+    assert a["month"] == "2026-07"
+    assert a["category"] == "groceries"
+    assert a["spent"] == 430.00
+    assert a["budget"] == 400.00
+    assert a["over_by"] == 30.00
+    assert a["over_pct"] == 7.5
+
+
+def test_budget_alerts_within_budget_is_silent():
+    assert budget_alerts(budget_txns(), {"groceries": 500.0}) == []
+
+
+def test_budget_alerts_ignores_unbudgeted_categories():
+    # dining and subscriptions have no budget entries: never flagged
+    alerts = budget_alerts(budget_txns(), {"dining": 1000.0})
+    assert alerts == []
+
+
+def test_budget_alerts_ignores_income():
+    alerts = budget_alerts(budget_txns(), {"income": 100.0})
+    assert alerts == []
+
+
+def test_budget_alerts_sorted_by_over_by():
+    txns = budget_txns() + [txn(25, "STARBUCKS #7", -60.00, "dining")]
+    alerts = budget_alerts(txns, {"groceries": 400.0, "dining": 50.0})
+    assert [a["category"] for a in alerts] == ["groceries", "dining"]
+    assert alerts[0]["over_by"] == 30.00
+    assert alerts[1]["over_by"] == 22.00
+
+
+def test_analyze_includes_budget_alerts():
+    report = analyze(budget_txns(), budgets={"groceries": 400.0})
+    assert len(report["budget_alerts"]) == 1
+    assert report["budgets_set"] is True
+
+
+def test_analyze_no_budgets_empty_alerts():
+    report = analyze(budget_txns())
+    assert report["budget_alerts"] == []
+    assert report["budgets_set"] is False
+    assert "(no budgets set)" in format_report(report)
+
+
+def test_format_report_shows_alert_line():
+    report = analyze(budget_txns(), budgets={"groceries": 400.0})
+    text = format_report(report)
+    assert "== Budget alerts ==" in text
+    assert "groceries" in text
+    assert "over by $30.00" in text
+
+
+def test_format_report_all_within_budget():
+    report = analyze(budget_txns(), budgets={"groceries": 900.0})
+    assert "(all categories within budget)" in format_report(report)

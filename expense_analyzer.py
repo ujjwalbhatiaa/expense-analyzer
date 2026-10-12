@@ -16,6 +16,10 @@ Usage:
     python expense_analyzer.py expenses.csv
     python expense_analyzer.py expenses.csv --json
     python expense_analyzer.py expenses.csv --top 10
+    python expense_analyzer.py expenses.csv --budgets budgets.json
+
+budgets.json maps category -> monthly spending cap, e.g.:
+    {"groceries": 400.0, "dining": 150.0}
 """
 
 from __future__ import annotations
@@ -285,7 +289,33 @@ def biggest_single_expenses(transactions: Iterable[Transaction],
     ]
 
 
-def analyze(transactions: list[Transaction], top_n: int = 10) -> dict:
+def budget_alerts(transactions: Iterable[Transaction],
+                  budgets: dict[str, float]) -> list[dict]:
+    """Flag month/categories where spending exceeded the monthly budget.
+
+    `budgets` maps category -> monthly spending cap. Only overruns are
+    reported (spent > budget); categories without a budget entry are ignored.
+    """
+    spent: dict[tuple[str, str], float] = defaultdict(float)
+    for t in transactions:
+        if t.amount < 0:
+            budget = budgets.get(t.category)
+            if budget is not None and budget > 0:
+                spent[(t.date.strftime("%Y-%m"), t.category)] += -t.amount
+    alerts = [
+        {"month": month, "category": category,
+         "spent": round(total, 2), "budget": round(budgets[category], 2),
+         "over_by": round(total - budgets[category], 2),
+         "over_pct": round((total / budgets[category] - 1) * 100, 1)}
+        for (month, category), total in spent.items()
+        if total > budgets[category]
+    ]
+    return sorted(alerts, key=lambda a: (-a["over_by"], a["month"],
+                                        a["category"]))
+
+
+def analyze(transactions: list[Transaction], top_n: int = 10,
+            budgets: dict[str, float] | None = None) -> dict:
     """Run the full analysis suite and return a JSON-serializable report."""
     return {
         "transaction_count": len(transactions),
@@ -298,6 +328,8 @@ def analyze(transactions: list[Transaction], top_n: int = 10) -> dict:
         "top_merchants": top_merchants(transactions, top_n),
         "recurring_charges": recurring_charges(transactions),
         "biggest_single_expenses": biggest_single_expenses(transactions),
+        "budget_alerts": budget_alerts(transactions, budgets) if budgets else [],
+        "budgets_set": budgets is not None,
     }
 
 
@@ -339,6 +371,19 @@ def format_report(report: dict) -> str:
     for e in report["biggest_single_expenses"]:
         lines.append(f"- {e['date']} {e['description'][:45]:<45} "
                      f"${e['amount']:.2f} [{e['category']}]")
+    if report.get("budget_alerts") is not None and "budget_alerts" in report:
+        lines.append("")
+        lines.append("== Budget alerts ==")
+        if report["budget_alerts"]:
+            for a in report["budget_alerts"]:
+                lines.append(f"- {a['month']} {a['category']:<15} "
+                             f"spent ${a['spent']:.2f} of ${a['budget']:.2f} "
+                             f"budget (over by ${a['over_by']:.2f}, "
+                             f"+{a['over_pct']:.1f}%)")
+        elif report.get("budgets_set"):
+            lines.append("(all categories within budget)")
+        else:
+            lines.append("(no budgets set)")
     return "\n".join(lines)
 
 
@@ -354,6 +399,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the report as JSON instead of text")
     parser.add_argument("--top", type=int, default=10,
                         help="number of top merchants to show (default: 10)")
+    parser.add_argument("--budgets",
+                        help="JSON file mapping category -> monthly spending"
+                             " cap; overruns are reported as budget alerts")
     args = parser.parse_args(argv)
 
     try:
@@ -366,7 +414,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warning: skipped {parsed.skipped_rows} malformed row(s)",
               file=sys.stderr)
 
-    report = analyze(parsed.transactions, top_n=args.top)
+    budgets = None
+    if args.budgets:
+        try:
+            with open(args.budgets, encoding="utf-8") as fh:
+                budgets = {str(k): float(v) for k, v in json.load(fh).items()}
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"error: cannot read budgets file: {exc}", file=sys.stderr)
+            return 1
+
+    report = analyze(parsed.transactions, top_n=args.top, budgets=budgets)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
